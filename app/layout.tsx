@@ -3,7 +3,7 @@ import type { Metadata, Viewport } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Bloomcare | Maternity Care Workspace',
+  title: 'BabyTech | Maternity Care Workspace',
   description: 'A private maternity care workspace for patient records, due-date coordination, and care-team follow-up.',
   generator: 'v0.app',
   icons: {
