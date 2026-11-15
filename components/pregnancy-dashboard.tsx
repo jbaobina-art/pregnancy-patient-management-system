@@ -21,9 +21,22 @@ type Patient = {
 }
 type PatientEvent = { id: string; event_type: string; summary: string; details: string | null; occurred_at: string }
 type PatientDraft = { full_name: string; phone: string; email: string; due_date: string; pregnancy_notes: string; birth_plan: string }
+type JourneyDraft = { event_type: string; summary: string; details: string; date: string }
 
 const supabase = createClient()
 const blankPatient: PatientDraft = { full_name: '', phone: '', email: '', due_date: '', pregnancy_notes: '', birth_plan: '' }
+const journeyTypes = [
+  ['meal', 'Meal / food log'],
+  ['monthly_update', 'Monthly update'],
+  ['appointment', 'Appointment'],
+  ['symptom', 'Symptom or wellbeing'],
+  ['milestone', 'Pregnancy milestone'],
+  ['clinical_note', 'Care-team note'],
+]
+
+function blankJourney(): JourneyDraft {
+  return { event_type: 'monthly_update', summary: '', details: '', date: new Date().toISOString().slice(0, 10) }
+}
 
 function daysUntil(date: string) {
   const today = new Date()
@@ -58,8 +71,12 @@ export function PregnancyDashboard() {
   const [filter, setFilter] = useState('all')
   const [modal, setModal] = useState(false)
   const [draft, setDraft] = useState(blankPatient)
+  const [editingPatient, setEditingPatient] = useState(false)
   const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState('')
+  const [journeyDraft, setJourneyDraft] = useState<JourneyDraft>(blankJourney)
+  const [editingEventId, setEditingEventId] = useState<string | null>(null)
+  const [journeySaving, setJourneySaving] = useState(false)
   const [eventDraft, setEventDraft] = useState('')
   const [mobileNav, setMobileNav] = useState(false)
 
@@ -71,6 +88,10 @@ export function PregnancyDashboard() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => setUser(session?.user ?? null))
     return () => subscription.unsubscribe()
   }, [])
+
+  useEffect(() => {
+    if (!modal) setEditingPatient(false)
+  }, [modal])
 
   const loadPatients = useCallback(async () => {
     setLoading(true)
@@ -84,12 +105,22 @@ export function PregnancyDashboard() {
   }, [])
 
   const loadEvents = useCallback(async (patientId: string) => {
-    const { data } = await supabase.from('patient_events').select('id,event_type,summary,details,occurred_at').eq('patient_id', patientId).order('occurred_at', { ascending: false }).limit(8)
+    const { data, error } = await supabase.from('patient_events').select('id,event_type,summary,details,occurred_at').eq('patient_id', patientId).order('occurred_at', { ascending: false }).limit(50)
+    if (selected !== patientId) return
+    if (error) {
+      setNotice('Could not load this patient’s pregnancy records. Please try again.')
+      return
+    }
     setEvents((data ?? []) as PatientEvent[])
-  }, [])
+  }, [selected])
 
   useEffect(() => { if (user) void loadPatients() }, [user, loadPatients])
-  useEffect(() => { if (selected && user) void loadEvents(selected); else setEvents([]) }, [selected, user, loadEvents])
+  useEffect(() => {
+    setEditingEventId(null)
+    setJourneyDraft(blankJourney())
+    setEvents([])
+    if (selected && user) void loadEvents(selected)
+  }, [selected, user, loadEvents])
 
   const activePatients = useMemo(() => patients.filter((patient) => patient.status === 'active'), [patients])
   const dueSoon = useMemo(() => activePatients.filter((patient) => daysUntil(patient.due_date) <= 14 && daysUntil(patient.due_date) >= 0), [activePatients])
@@ -122,25 +153,92 @@ export function PregnancyDashboard() {
     setAuthBusy(false)
   }
 
-  async function addPatient(event: FormEvent<HTMLFormElement>) {
+  async function savePatient(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!user) return
     setSaving(true)
-    const { data, error } = await supabase.from('patients').insert({
+    const patientDetails = {
       full_name: draft.full_name.trim(), phone: draft.phone.trim() || null, email: draft.email.trim() || null,
       due_date: draft.due_date, pregnancy_notes: draft.pregnancy_notes.trim() || null,
       birth_plan: draft.birth_plan.trim() || null,
-    }).select('id').single()
-    if (error || !data) setNotice('Patient could not be saved. Please check the required fields and try again.')
-    else {
-      await supabase.from('patient_events').insert({ patient_id: data.id, event_type: 'check_in', summary: 'Patient added to maternity care' })
-      setNotice(`${draft.full_name} added to your patient list.`)
-      setDraft(blankPatient)
-      setModal(false)
-      await loadPatients()
-      setSelected(data.id)
+    }
+    if (editingPatient && activePatient) {
+      const { error } = await supabase.from('patients').update({ ...patientDetails, updated_at: new Date().toISOString() }).eq('id', activePatient.id)
+      if (error) setNotice('Patient details could not be updated. Please try again.')
+      else {
+        setNotice(`${draft.full_name}’s patient details were updated.`)
+        setModal(false)
+        await loadPatients()
+      }
+    } else {
+      const { data, error } = await supabase.from('patients').insert(patientDetails).select('id').single()
+      if (error || !data) setNotice('Patient could not be saved. Please check the required fields and try again.')
+      else {
+        await supabase.from('patient_events').insert({ patient_id: data.id, event_type: 'check_in', summary: 'Patient added to maternity care' })
+        setNotice(`${draft.full_name} added to your patient list.`)
+        setDraft(blankPatient)
+        setModal(false)
+        await loadPatients()
+        setSelected(data.id)
+      }
     }
     setSaving(false)
+  }
+
+  function openPatientEditor() {
+    if (!activePatient) return
+    setDraft({
+      full_name: activePatient.full_name,
+      phone: activePatient.phone ?? '',
+      email: activePatient.email ?? '',
+      due_date: activePatient.due_date,
+      pregnancy_notes: activePatient.pregnancy_notes ?? '',
+      birth_plan: activePatient.birth_plan ?? '',
+    })
+    setEditingPatient(true)
+    setModal(true)
+  }
+
+  async function addJourneyEntry(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!activePatient || !journeyDraft.summary.trim() || journeySaving) return
+    setJourneySaving(true)
+    const entry = {
+      event_type: journeyDraft.event_type,
+      summary: journeyDraft.summary.trim(),
+      details: journeyDraft.details.trim() || null,
+      occurred_at: `${journeyDraft.date}T12:00:00.000Z`,
+    }
+    const { error } = editingEventId
+      ? await supabase.from('patient_events').update(entry).eq('id', editingEventId).eq('patient_id', activePatient.id)
+      : await supabase.from('patient_events').insert({ ...entry, patient_id: activePatient.id })
+    if (error) setNotice('Could not save this pregnancy record. Please try again.')
+    else {
+      setJourneyDraft(blankJourney())
+      setEditingEventId(null)
+      await loadEvents(activePatient.id)
+      setNotice(editingEventId ? 'Pregnancy journey entry updated.' : 'Pregnancy journey entry saved.')
+    }
+    setJourneySaving(false)
+  }
+
+  function editJourneyEntry(entry: PatientEvent) {
+    setJourneyDraft({
+      event_type: entry.event_type,
+      summary: entry.summary,
+      details: entry.details ?? '',
+      date: entry.occurred_at.slice(0, 10),
+    })
+    setEditingEventId(entry.id)
+    document.getElementById('journey-heading')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+
+  async function addEvent(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!activePatient || !eventDraft.trim()) return
+    const { error } = await supabase.from('patient_events').insert({ patient_id: activePatient.id, event_type: 'clinical_note', summary: eventDraft.trim() })
+    if (error) setNotice('Could not save the care note. Please try again.')
+    else { setEventDraft(''); await loadEvents(activePatient.id); setNotice('Care note saved.') }
   }
 
   async function reportWaterBreak() {
@@ -152,14 +250,6 @@ export function PregnancyDashboard() {
     setNotice(`Water-break report recorded for ${activePatient.full_name}. Follow your clinical protocol and contact the patient.`)
     await loadPatients()
     await loadEvents(activePatient.id)
-  }
-
-  async function addEvent(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    if (!activePatient || !eventDraft.trim()) return
-    const { error } = await supabase.from('patient_events').insert({ patient_id: activePatient.id, event_type: 'clinical_note', summary: eventDraft.trim() })
-    if (error) setNotice('Could not save the care note. Please try again.')
-    else { setEventDraft(''); await loadEvents(activePatient.id); setNotice('Care note saved.') }
   }
 
   async function signOut() { await supabase.auth.signOut(); setPatients([]); setSelected(null) }
@@ -182,7 +272,43 @@ export function PregnancyDashboard() {
           <aside className="detail-column">{activePatient ? <><section className="detail-card"><div className="detail-title-row"><div><span className="eyebrow">PATIENT SNAPSHOT</span><h2>Care details</h2></div><span className="more-dots" aria-hidden="true">•••</span></div><div className="patient-identity"><span className="patient-avatar large-avatar">{initials(activePatient.full_name)}</span><div><h3>{activePatient.full_name}</h3><span className="active-tag"><span className="live-dot" /> Active patient</span></div></div><div className="due-date-panel"><span>ESTIMATED DUE DATE</span><strong>{prettyDate(activePatient.due_date)}</strong><div className="due-progress"><span style={{ width: `${Math.max(0, Math.min(100, ((280 - daysUntil(activePatient.due_date)) / 280) * 100))}%` }} /></div><div className="due-meta"><span>{gestation(activePatient.due_date)} gestation</span><strong>{daysUntil(activePatient.due_date) >= 0 ? `${daysUntil(activePatient.due_date)} days to EDD` : `${Math.abs(daysUntil(activePatient.due_date))} days past EDD`}</strong></div></div><div className="detail-fields">{activePatient.phone && <div><span>PHONE</span><strong>{activePatient.phone}</strong></div>}{activePatient.email && <div><span>EMAIL</span><strong>{activePatient.email}</strong></div>}{activePatient.birth_plan && <div><span>BIRTH PLAN</span><strong>{activePatient.birth_plan}</strong></div>}{activePatient.pregnancy_notes && <div><span>CARE NOTES</span><strong>{activePatient.pregnancy_notes}</strong></div>}</div>{activePatient.water_break_reported ? <div className="water-status"><Droplets /><div><strong>Possible water break reported</strong><span>{activePatient.water_break_time ? new Date(activePatient.water_break_time).toLocaleString() : 'Time not recorded'} · Clinician review needed</span></div></div> : <button className="water-report-button" onClick={reportWaterBreak}><Droplets /> Record possible water break</button>}<p className="clinical-caveat">This record supports coordination only. Follow your clinical protocols and the patient&apos;s individualized plan for assessment and hospital timing.</p></section>
             <section className="activity-card"><div className="activity-heading"><div><span className="eyebrow">CARE TIMELINE</span><h2>Recent activity</h2></div><span className="activity-icon"><Activity /></span></div><form className="note-form" onSubmit={addEvent}><input aria-label="Add a care note" placeholder="Add a care note…" value={eventDraft} onChange={(e) => setEventDraft(e.target.value)} /><button disabled={!eventDraft.trim()} aria-label="Save care note"><Plus /></button></form><div className="timeline">{events.length ? events.slice(0, 4).map((event) => <div className="timeline-item" key={event.id}><span className={`timeline-dot ${event.event_type === 'water_break' ? 'timeline-alert' : ''}`}>{event.event_type === 'water_break' ? <Droplets /> : <Check />}</span><div><strong>{event.summary}</strong><span>{new Date(event.occurred_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>{event.details && <small>{event.details}</small>}</div></div>) : <p className="timeline-empty">No care events yet. Notes and patient check-ins will appear here.</p>}</div></section></> : <section className="detail-card detail-empty"><div className="empty-icon"><UserRound /></div><h2>Select a patient</h2><p>Choose a patient to view due-date details and recent care activity.</p></section>}</aside></div>
         <div className="safety-footer"><div className="safety-icon"><AlertCircle /></div><p><strong>Clinical safety reminder</strong><span>This system does not triage, diagnose, or determine when someone should go to the hospital. For possible labor, ruptured membranes, reduced fetal movement, bleeding, severe pain, or any urgent concern, contact the patient&apos;s maternity care team or local emergency services immediately according to local protocol.</span></p></div>
+        {activePatient && <section className="journey-card" aria-labelledby="journey-heading">
+          <div className="journey-heading">
+            <div><span className="eyebrow">PREGNANCY JOURNEY</span><h2 id="journey-heading">Journey records</h2><p>Keep meals, monthly updates, appointments and milestones together for this patient.</p></div>
+            <button type="button" className="secondary-button" onClick={openPatientEditor}>Edit patient details</button>
+          </div>
+          <form className="journey-form" onSubmit={addJourneyEntry}>
+            <label>Record type<select value={journeyDraft.event_type} onChange={(e) => setJourneyDraft({ ...journeyDraft, event_type: e.target.value })}>{journeyTypes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+            <label>Date<input required type="date" value={journeyDraft.date} onChange={(e) => setJourneyDraft({ ...journeyDraft, date: e.target.value })} /></label>
+            <label className="journey-summary">Title<input required maxLength={160} value={journeyDraft.summary} onChange={(e) => setJourneyDraft({ ...journeyDraft, summary: e.target.value })} placeholder={journeyDraft.event_type === 'meal' ? 'What did the patient eat?' : journeyDraft.event_type === 'monthly_update' ? 'What changed this month?' : 'Add a short title'} /></label>
+            <label className="journey-notes">Details<textarea rows={3} value={journeyDraft.details} onChange={(e) => setJourneyDraft({ ...journeyDraft, details: e.target.value })} placeholder="Add context, observations, questions or follow-up notes…" /></label>
+            <div className="journey-form-actions">
+              {editingEventId && <button type="button" className="secondary-button" onClick={() => { setEditingEventId(null); setJourneyDraft(blankJourney()) }}>Cancel edit</button>}
+              <button className="primary-button journey-submit" disabled={!journeyDraft.summary.trim() || journeySaving}>{journeySaving ? 'Saving…' : <><Plus /> {editingEventId ? 'Save changes' : 'Save journey record'}</>}</button>
+            </div>
+          </form>
+          <div className="journey-list" aria-live="polite">
+            {events.length ? events.map((entry) => <article className="journey-entry" key={entry.id}>
+              <div className="journey-entry-meta"><span>{journeyTypes.find(([value]) => value === entry.event_type)?.[1] ?? 'Care record'}</span><time dateTime={entry.occurred_at}>{new Date(entry.occurred_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}</time><button type="button" className="journey-edit" onClick={() => editJourneyEntry(entry)}>Edit</button></div>
+              <h3>{entry.summary}</h3>{entry.details && <p>{entry.details}</p>}
+            </article>) : <p className="journey-empty">No journey records yet. Add a meal, monthly update or other milestone above.</p>}
+          </div>
+          {events.length === 50 && <p className="journey-limit">Showing the 50 most recent records.</p>}
+        </section>}
       </div></section>
-    {modal && <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setModal(false) }}><section className="patient-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-heading"><div><span className="eyebrow">NEW CARE RECORD</span><h2 id="modal-title">Add a patient</h2><p>Capture essential details for your care team.</p></div><button className="close-modal" aria-label="Close dialog" onClick={() => setModal(false)}><X /></button></div><form onSubmit={addPatient}><label>Patient full name<input required autoFocus value={draft.full_name} onChange={(e) => setDraft({ ...draft, full_name: e.target.value })} placeholder="e.g. Jordan Lee" /></label><div className="form-row"><label>Estimated due date<input required type="date" value={draft.due_date} onChange={(e) => setDraft({ ...draft, due_date: e.target.value })} /></label><label>Phone number<input type="tel" value={draft.phone} onChange={(e) => setDraft({ ...draft, phone: e.target.value })} placeholder="(555) 000-0000" /></label></div><label>Email address <span className="optional-label">Optional</span><input type="email" value={draft.email} onChange={(e) => setDraft({ ...draft, email: e.target.value })} placeholder="patient@email.com" /></label><label>Birth plan <span className="optional-label">Optional</span><input value={draft.birth_plan} onChange={(e) => setDraft({ ...draft, birth_plan: e.target.value })} placeholder="e.g. Midwife-led care" /></label><label>Care notes <span className="optional-label">Optional</span><textarea rows={3} value={draft.pregnancy_notes} onChange={(e) => setDraft({ ...draft, pregnancy_notes: e.target.value })} placeholder="Relevant care notes for your team" /></label><div className="modal-footnote"><ShieldCheck /> Patient records are private to your signed-in care account.</div><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setModal(false)}>Cancel</button><button className="primary-button" disabled={saving}>{saving ? 'Saving…' : 'Save patient'}<span aria-hidden="true">→</span></button></div></form></section></div>}
+    {modal && <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setModal(false) }}>
+      <section className="patient-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <div className="modal-heading"><div><span className="eyebrow">{editingPatient ? 'PATIENT RECORD' : 'NEW CARE RECORD'}</span><h2 id="modal-title">{editingPatient ? 'Edit patient details' : 'Add a patient'}</h2><p>{editingPatient ? 'Keep contact and pregnancy care details up to date.' : 'Capture essential details for your care team.'}</p></div><button className="close-modal" aria-label="Close dialog" onClick={() => setModal(false)}><X /></button></div>
+        <form onSubmit={savePatient}>
+          <label>Patient full name<input required autoFocus value={draft.full_name} onChange={(e) => setDraft({ ...draft, full_name: e.target.value })} placeholder="e.g. Jordan Lee" /></label>
+          <div className="form-row"><label>Estimated due date<input required type="date" value={draft.due_date} onChange={(e) => setDraft({ ...draft, due_date: e.target.value })} /></label><label>Phone number<input type="tel" value={draft.phone} onChange={(e) => setDraft({ ...draft, phone: e.target.value })} placeholder="(555) 000-0000" /></label></div>
+          <label>Email address <span className="optional-label">Optional</span><input type="email" value={draft.email} onChange={(e) => setDraft({ ...draft, email: e.target.value })} placeholder="patient@email.com" /></label>
+          <label>Birth plan <span className="optional-label">Optional</span><input value={draft.birth_plan} onChange={(e) => setDraft({ ...draft, birth_plan: e.target.value })} placeholder="e.g. Midwife-led care" /></label>
+          <label>Care notes <span className="optional-label">Optional</span><textarea rows={3} value={draft.pregnancy_notes} onChange={(e) => setDraft({ ...draft, pregnancy_notes: e.target.value })} placeholder="Relevant care notes for your team" /></label>
+          <div className="modal-footnote"><ShieldCheck /> Patient records are private to your signed-in care account.</div>
+          <div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setModal(false)}>Cancel</button><button className="primary-button" disabled={saving}>{saving ? 'Saving…' : editingPatient ? 'Save changes' : 'Save patient'}<span aria-hidden="true">→</span></button></div>
+        </form>
+      </section>
+    </div>}
   </main>
 }
